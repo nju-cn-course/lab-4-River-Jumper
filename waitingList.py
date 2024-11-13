@@ -94,9 +94,6 @@ class Ipv4PacketWaitingList:
 
     def refresh(self):
         self.total_refresh_time += 1
-        log_info(f"Refresh! total refresh time = {self.total_refresh_time}")
-        # log_info(f"waiting list refresh!")
-        # self.print_waiting_list()
         for key in self.ip2waiting_list.copy():
             if time.time() - self.ip2arp_request[key].last_refresh_time >= 0.2:
                 log_info(
@@ -131,16 +128,6 @@ class Ipv4PacketWaitingList:
                 return
             ethernet_header = Ethernet(src=self.ip2arp_request[target_ip].interface.ethaddr, dst=target_mac)
             for packet in self.ip2waiting_list[target_ip]:
-                '''
-                if packet.get_header(ICMP) is not None:
-                    final_packet = ethernet_header + packet.get_header(IPv4) + packet.get_header(ICMP)
-                elif packet.get_header(UDP) is not None:
-                    final_packet = (ethernet_header + packet.get_header(IPv4) +
-                                    packet.get_header(UDP) + packet.get_header(RawPacketContents))
-                else:
-                    final_packet = ethernet_header + packet.get_header(IPv4)
-                '''
-
                 log_info(f"packet = {packet}")
                 log_info(f"ethernet_header = {ethernet_header}")
                 packet.prepend_header(ethernet_header)

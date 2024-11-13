@@ -3,6 +3,7 @@
 '''
 Basic IPv4 router (static routing) in Python.
 '''
+import copy
 
 import arpTable
 import ipForwardingTable
@@ -19,6 +20,12 @@ class Router(object):
         self.forward_table = ipForwardingTable.IPForwardingTable(self)
         self.ipv4_packet_waiting_list = waitingList.Ipv4PacketWaitingList(1, 5, self)
         self.send_packet_log = []
+        self.receive_packet_log = []
+        self.handlers = [
+            (self.is_ipv4_packet, self.handle_ipv4_packet),
+            (self.is_arp_request_packet, self.handle_arp_request_packet),
+            (self.is_arp_reply_packet, self.handle_arp_reply_packet)
+        ]
         # other initialization stuff here
 
         log_info("=============================(router ports)===================")
@@ -42,48 +49,75 @@ class Router(object):
 
         log_info("!!#########################receive packet")
         log_info(f"{packet} arrived on {ifaceName}")
+        self.receive_packet_log.append([ifaceName, packet])
 
+        # deal with ethernet_header
+        # first header is not ethernet header
+        ethernet_header = packet[0]
+        del packet[0]
+        if not isinstance(ethernet_header, Ethernet):
+            log_info("first header is not ethernet header")
+            return
         # packet not for this port
-        ethernet_header = packet.get_header(Ethernet)
         if ethernet_header.dst not in [port.ethaddr for port in self.net.ports() if port.name == ifaceName] and str(
                 ethernet_header.dst) != 'ff:ff:ff:ff:ff:ff':
             log_info("packet not for this router")
             return
 
-        vlan_header = packet.get_header(Vlan)
-        if vlan_header is not None:
+        for condition, handler in self.handlers:
+            if condition(packet):
+                handler(ifaceName, packet)
+            else:
+                log_info("No handler in handlers can deal with this packet!")
+
+
+        '''
+        # vlan_header = packet.get_header(Vlan)
+        if packet.has_header(Vlan):
             return
 
         # handle arp reply packet
         arp_header = packet.get_header(Arp)
         if arp_header is not None and arp_header.operation == ArpOperation.Reply:
             log_info("!!###########(receive arp reply packet) ")
-            Router.handle_arp_reply_packet(self, arp_header, ethernet_header)
+            Router.handle_arp_reply_packet(self, ifaceName, packet)
 
         # handle arp request packet
         arp_header = packet.get_header(Arp)
         if arp_header is not None and arp_header.operation == ArpOperation.Request:
             log_info("??###########(receive arp request packet)")
-            Router.handle_arp_request_packet(self, arp_header, ifaceName, packet)
+            Router.handle_arp_request_packet(self, ifaceName, packet)
 
         # handle IPv4 packet
         ipv4_header = packet.get_header(IPv4)
         if ipv4_header is not None:
             log_info("##############(receive ipv4 packet)")
-            log_info(f"{packet}")
-            Router.handle_ipv4_packet(self, ipv4_header, packet)
+            Router.handle_ipv4_packet(self, ifaceName, packet)
+        '''
 
-    def handle_arp_reply_packet(self, arp_header, ethernet_header):
+    def is_ipv4_packet(self, packet):
+        return isinstance(packet[0], IPv4)
 
-        if str(ethernet_header.src) == 'ff:ff:ff:ff:ff:ff':
-            log_info("illegal arp reply packet")
-            return
+    def is_arp_request_packet(self, packet):
+        return isinstance(packet[0], Arp) and packet[0].operation == ArpOperation.Request
+
+    def is_arp_reply_packet(self, packet):
+        return isinstance(packet[0], Arp) and packet[0].operation == ArpOperation.Reply
+
+    def handle_arp_reply_packet(self, receive_port_name, packet):
+        log_info("!!###########(receive arp reply packet) ")
+
+        arp_header = packet.get_header(Arp)
 
         sender_ip = arp_header.senderprotoaddr
         sender_mac = arp_header.senderhwaddr
         target_ip = arp_header.targetprotoaddr
         target_mac = arp_header.targethwaddr
         log_info(f"sender ip={sender_ip}, sender_mac={sender_mac}, target ip={target_ip}, target mac={target_mac}")
+
+        if str(sender_mac) == 'ff:ff:ff:ff:ff:ff':
+            log_info("illegal arp reply packet")
+            return
 
         # check arp header
         if target_ip not in [port.ipaddr for port in self.net.ports()] or target_mac not in [port.ethaddr for port in
@@ -95,16 +129,14 @@ class Router(object):
 
         self.arp_table.add_element(sender_ip, sender_mac)
 
-        # if not self.arp_table.is_ip_in_arp_table(target_ip):
-        #     log_info("add target ip-mac to arp cache")
-        #     self.arp_table.add_element(target_ip, target_mac)
-
         # is this arp reply packet for this router?
         for interface in self.net.interfaces():
             if interface.ethaddr == target_mac:
                 self.ipv4_packet_waiting_list.get_arp_reply(str(sender_ip), sender_mac, interface)
 
-    def handle_ipv4_packet(self, ipv4_header, packet):
+    def handle_ipv4_packet(self, receive_port_name, packet):
+        log_info("!!###########(receive ipv4 packet) ")
+        ipv4_header = packet.get_header(IPv4)
         # packet for router itself
         for port in self.net.ports():
             if str(port.ipaddr) == str(ipv4_header.dst):
@@ -137,8 +169,6 @@ class Router(object):
                 for port in self.net.ports():
                     # log_info(f"port's name = {port.name}")
                     if port.name == interface_name:
-                        # delete ethernet header
-                        del packet[0]
                         self.ipv4_packet_waiting_list.add_packet(packet, port, str(next_hop_ip))
                         break
             #
@@ -148,7 +178,6 @@ class Router(object):
                 for port in self.net.ports():
                     if port.name == interface_name:
                         ethernet_header = Ethernet(src=port.ethaddr, dst=target_mac)
-                        del packet[0]
                         log_info(f"packet = {packet}")
                         log_info(f"ethernet_header = {ethernet_header}")
                         packet.prepend_header(ethernet_header)
@@ -158,7 +187,9 @@ class Router(object):
 
                         self.router_send_packet(port, packet)
 
-    def handle_arp_request_packet(self, arp_header, ifaceName, packet):
+    def handle_arp_request_packet(self, receive_port_name, packet):
+        log_info("!!###########(receive arp reply packet) ")
+        arp_header = packet.get_header(Arp)
 
         sender_ip = arp_header.senderprotoaddr
         sender_mac = arp_header.senderhwaddr
@@ -174,20 +205,15 @@ class Router(object):
         # add ip-mac into arp cache
         self.arp_table.add_element(sender_ip, sender_mac)
 
-        # if target_mac is not None and (not self.arp_table.is_ip_in_arp_table(target_ip)):
-        #    self.arp_table.add_element(target_ip, target_mac)
-
-        # log_debug(f"target ip = {target_ip}, target mac = {target_mac}")
-
         # need to replay
         if target_mac is not None:
             log_info("need to reply")
-            # create_ip_arp_reply(senderhwaddr, targethwaddr, senderprotoaddr, targetprotoaddr)
+            # create_ip_arp_reply
             reply_packet = create_ip_arp_reply(target_mac, sender_mac, target_ip, sender_ip)
             log_debug(f"sender ip = {sender_ip}, sender mac = {sender_mac}")
 
             for interface in self.net.interfaces():
-                if interface.name == ifaceName:
+                if interface.name == receive_port_name:
                     log_info(f"send arp reply packet to {sender_ip} from {interface.name}")
                     self.router_send_packet(interface, reply_packet)
 
